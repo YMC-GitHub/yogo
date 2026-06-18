@@ -208,7 +208,6 @@ jobs:
           GHCR_TAGS_RAW=""
           FINAL_TAGS=""
 
-          # 读取原始标签
           if [[ "${{ inputs.push_registry }}" == "dockerhub" || "${{ inputs.push_registry }}" == "both" ]]; then
             DOCKER_TAGS_RAW="${{ steps.meta-dockerhub.outputs.tags }}"
           fi
@@ -216,20 +215,18 @@ jobs:
             GHCR_TAGS_RAW="${{ steps.meta-ghcr.outputs.tags }}"
           fi
 
-          # 处理逻辑：换行 → 逗号，再清理首尾、连续逗号
           clean_tags() {
             local raw="$1"
             echo "$raw" \
-              | sed '/^\s*$/d' \          # 删除空行
-              | tr '\n' ',' \              # 换行全部替换为逗号
-              | sed 's/,\+/,/g' \          # 多个连续逗号压缩成单个
-              | sed 's/^,//; s/,$//'       # 删掉开头、结尾逗号
+              | sed '/^\s*$/d' \
+              | tr '\n' ',' \
+              | sed 's/,\+/,/g' \
+              | sed 's/^,//; s/,$//'
           }
 
           DOCKER_CLEAN=$(clean_tags "$DOCKER_TAGS_RAW")
           GHCR_CLEAN=$(clean_tags "$GHCR_TAGS_RAW")
 
-          # 拼接两段，中间加逗号（只有两段都非空才加）
           if [[ -n "$DOCKER_CLEAN" && -n "$GHCR_CLEAN" ]]; then
             FINAL_TAGS="${DOCKER_CLEAN},${GHCR_CLEAN}"
           elif [[ -n "$DOCKER_CLEAN" ]]; then

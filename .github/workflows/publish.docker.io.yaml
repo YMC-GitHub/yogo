@@ -204,24 +204,35 @@ jobs:
       - name: Combine full image tags list
         id: combine-tags
         run: |
+          # 清空变量
           DOCKER_TAGS=""
           GHCR_TAGS=""
+          FINAL_TAGS=""
+
+          # 读取并清理DockerHub标签：删除换行、首尾空格
           if [[ "${{ inputs.push_registry }}" == "dockerhub" || "${{ inputs.push_registry }}" == "both" ]]; then
-            DOCKER_TAGS=$(echo "${{ steps.meta-dockerhub.outputs.tags }}" | tr -d '\n' | tr -s ' ')
+            RAW_DOCKER="${{ steps.meta-dockerhub.outputs.tags }}"
+            DOCKER_TAGS=$(echo "$RAW_DOCKER" | tr -d '\n' | sed 's/ *, */,/g' | sed 's/^ *, *//' | sed 's/ *, *$//')
           fi
+
+          # 读取并清理GHCR标签
           if [[ "${{ inputs.push_registry }}" == "ghcr" || "${{ inputs.push_registry }}" == "both" ]]; then
-            GHCR_TAGS=$(echo "${{ steps.meta-ghcr.outputs.tags }}" | tr -d '\n' | tr -s ' ')
+            RAW_GHCR="${{ steps.meta-ghcr.outputs.tags }}"
+            GHCR_TAGS=$(echo "$RAW_GHCR" | tr -d '\n' | sed 's/ *, */,/g' | sed 's/^ *, *//' | sed 's/ *, *$//')
           fi
-          ALL_TAGS_LIST=()
-          if [[ -n "$DOCKER_TAGS" ]]; then
-            ALL_TAGS_LIST+=("$DOCKER_TAGS")
+
+          # 分段拼接，严格控制逗号
+          if [[ -n "$DOCKER_TAGS" && -n "$GHCR_TAGS" ]]; then
+            FINAL_TAGS="${DOCKER_TAGS},${GHCR_TAGS}"
+          elif [[ -n "$DOCKER_TAGS" ]]; then
+            FINAL_TAGS="$DOCKER_TAGS"
+          elif [[ -n "$GHCR_TAGS" ]]; then
+            FINAL_TAGS="$GHCR_TAGS"
           fi
-          if [[ -n "$GHCR_TAGS" ]]; then
-            ALL_TAGS_LIST+=("$GHCR_TAGS")
-          fi
-          ALL_TAGS=$(IFS=,; echo "${ALL_TAGS_LIST[*]}")
-          echo "full_image_tags=$ALL_TAGS" >> $GITHUB_OUTPUT
-          echo "Combined push tags: $ALL_TAGS"
+
+          # 输出到Action变量
+          echo "full_image_tags=$FINAL_TAGS" >> "$GITHUB_OUTPUT"
+          echo "Combined push tags: $FINAL_TAGS"
 
       # Build docker image + export local binary ./bin (match local docker build -o bin)
       - name: Build Docker & Export Binary to Local ./bin

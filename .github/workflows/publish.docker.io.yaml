@@ -204,33 +204,40 @@ jobs:
       - name: Combine full image tags list
         id: combine-tags
         run: |
-          # 清空变量
-          DOCKER_TAGS=""
-          GHCR_TAGS=""
+          DOCKER_TAGS_RAW=""
+          GHCR_TAGS_RAW=""
           FINAL_TAGS=""
 
-          # 读取并清理DockerHub标签：删除换行、首尾空格
+          # 读取原始标签
           if [[ "${{ inputs.push_registry }}" == "dockerhub" || "${{ inputs.push_registry }}" == "both" ]]; then
-            RAW_DOCKER="${{ steps.meta-dockerhub.outputs.tags }}"
-            DOCKER_TAGS=$(echo "$RAW_DOCKER" | tr -d '\n' | sed 's/ *, */,/g' | sed 's/^ *, *//' | sed 's/ *, *$//')
+            DOCKER_TAGS_RAW="${{ steps.meta-dockerhub.outputs.tags }}"
           fi
-
-          # 读取并清理GHCR标签
           if [[ "${{ inputs.push_registry }}" == "ghcr" || "${{ inputs.push_registry }}" == "both" ]]; then
-            RAW_GHCR="${{ steps.meta-ghcr.outputs.tags }}"
-            GHCR_TAGS=$(echo "$RAW_GHCR" | tr -d '\n' | sed 's/ *, */,/g' | sed 's/^ *, *//' | sed 's/ *, *$//')
+            GHCR_TAGS_RAW="${{ steps.meta-ghcr.outputs.tags }}"
           fi
 
-          # 分段拼接，严格控制逗号
-          if [[ -n "$DOCKER_TAGS" && -n "$GHCR_TAGS" ]]; then
-            FINAL_TAGS="${DOCKER_TAGS},${GHCR_TAGS}"
-          elif [[ -n "$DOCKER_TAGS" ]]; then
-            FINAL_TAGS="$DOCKER_TAGS"
-          elif [[ -n "$GHCR_TAGS" ]]; then
-            FINAL_TAGS="$GHCR_TAGS"
+          # 处理逻辑：换行 → 逗号，再清理首尾、连续逗号
+          clean_tags() {
+            local raw="$1"
+            echo "$raw" \
+              | sed '/^\s*$/d' \          # 删除空行
+              | tr '\n' ',' \              # 换行全部替换为逗号
+              | sed 's/,\+/,/g' \          # 多个连续逗号压缩成单个
+              | sed 's/^,//; s/,$//'       # 删掉开头、结尾逗号
+          }
+
+          DOCKER_CLEAN=$(clean_tags "$DOCKER_TAGS_RAW")
+          GHCR_CLEAN=$(clean_tags "$GHCR_TAGS_RAW")
+
+          # 拼接两段，中间加逗号（只有两段都非空才加）
+          if [[ -n "$DOCKER_CLEAN" && -n "$GHCR_CLEAN" ]]; then
+            FINAL_TAGS="${DOCKER_CLEAN},${GHCR_CLEAN}"
+          elif [[ -n "$DOCKER_CLEAN" ]]; then
+            FINAL_TAGS="$DOCKER_CLEAN"
+          elif [[ -n "$GHCR_CLEAN" ]]; then
+            FINAL_TAGS="$GHCR_CLEAN"
           fi
 
-          # 输出到Action变量
           echo "full_image_tags=$FINAL_TAGS" >> "$GITHUB_OUTPUT"
           echo "Combined push tags: $FINAL_TAGS"
 

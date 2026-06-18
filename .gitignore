@@ -1,0 +1,54 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# secret
+
+# video
+# 
+# bin
+bin/*
+
+# ignore pb files and db files in locale folder
+locale/**/*.bin
+locale/**/*.db
+locale/**/*.pb
+
+# ignore pb struct files for go in proto folder
+proto/**/*.pb.go
+
+# ignore data files in data folder
+data/*
+
+# ignore secret files in secret folder
+secret/*
+
+# ignore .ssh files in .ssh folder
+.ssh/*
+
+# ignore .gh-config files in.gh-config folder
+.gh-config/*
+
+# ignore model files in model folder
+model/*

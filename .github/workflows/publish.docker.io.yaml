@@ -38,11 +38,6 @@ on:
         required: false
         default: 'linux/amd64'
         type: string
-      build_target:
-        description: 'Dockerfile stage: export=output local binary; runtime=only image'
-        required: false
-        default: 'export'
-        type: string
       dockerfile_path:
         description: 'Path to Dockerfile'
         required: false
@@ -57,7 +52,6 @@ on:
         description: 'Manual release version tag (vX.Y.Z), auto detect from git tag'
         required: false
         default: ''
-        type: string
       publish_github_release:
         description: 'Create GitHub Release attach built binary & checksum files'
         required: false
@@ -96,11 +90,7 @@ jobs:
         id: flags
         run: |
           DEBUG_MODE="${{ inputs.debug_mode }}"
-          if [ "$DEBUG_MODE" = "true" ]; then
-            echo "debug_mode=true" >> $GITHUB_OUTPUT
-          else
-            echo "debug_mode=false" >> $GITHUB_OUTPUT
-          fi
+          echo "debug_mode=$DEBUG_MODE" >> $GITHUB_OUTPUT
 
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "is_main=true" >> $GITHUB_OUTPUT
@@ -127,7 +117,6 @@ jobs:
           fi
           echo "publish_release=$PUBLISH_RELEASE" >> $GITHUB_OUTPUT
 
-          # 构建推送开关：debug强制关闭push
           PUSH_ENABLED="true"
           if [[ "$DEBUG_MODE" == "true" ]]; then
             PUSH_ENABLED="false"
@@ -150,7 +139,6 @@ jobs:
           echo "🌐 China Mirror Enable: ${{ inputs.use_china_mirror }}"
           echo "📡 Alpine Mirror: ${{ inputs.alpine_mirror }}"
           echo "🏗️ Build Platforms: ${{ inputs.target_platforms }}"
-          echo "🎯 Docker Target Stage: runtime (push image) + export (extract bin)"
           echo "📄 Dockerfile Path: ${{ inputs.dockerfile_path }}"
           echo "🏷️ Custom Extra Tags: ${{ inputs.custom_tags }}"
           echo "🔖 Git Ref: ${{ github.ref }}"
@@ -237,14 +225,15 @@ jobs:
           echo "full_image_tags=$FINAL_TAGS" >> "$GITHUB_OUTPUT"
           echo "Combined push tags: $FINAL_TAGS"
 
-      - name: Build & Push + Export Binaries (runtime镜像推送,export分层导出双二进制)
+      # 第一段构建：runtime，本地load镜像、生成完整缓存、上传gha远程缓存，不推送
+      - name: Build local runtime image & generate full cache
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ inputs.dockerfile_path }}
           platforms: ${{ inputs.target_platforms }}
           target: runtime
-          push: ${{ steps.flags.outputs.push_enabled }}
+          push: false
           load: true
           tags: ${{ steps.combine-tags.outputs.full_image_tags }}
           labels: ${{ (inputs.push_registry == 'dockerhub' || inputs.push_registry == 'both') && steps.meta-dockerhub.outputs.labels || steps.meta-ghcr.outputs.labels }}
@@ -253,16 +242,56 @@ jobs:
           build-args: |
             USE_CHINA_MIRROR=${{ inputs.use_china_mirror }}
             ALPINE_MIRROR=${{ inputs.alpine_mirror }}
-          outputs: |
-            type=local,dest=${{ env.BIN_OUT_DIR }},target=export
 
-      - name: Validate built linux binary
+      # 第二段构建：独立target=export，稳定导出 Linux + Windows 双二进制，全缓存命中无编译
+      - name: Build export stage & export dual binaries
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          platforms: ${{ inputs.target_platforms }}
+          target: export
+          push: false
+          load: false
+          cache-from: type=gha
+          build-args: |
+            USE_CHINA_MIRROR=${{ inputs.use_china_mirror }}
+            ALPINE_MIRROR=${{ inputs.alpine_mirror }}
+          outputs: type=local,dest=${{ env.BIN_OUT_DIR }}
+
+      # 校验双平台二进制
+      - name: Validate compiled binaries
         run: |
           cd ${{ env.BIN_OUT_DIR }}
           chmod +x ./${{ env.BINARY_NAME }}
-          ./${{ env.BINARY_NAME }} --version || ./${{ env.BINARY_NAME }} --help || echo "Binary execute test ok"
+          ./${{ env.BINARY_NAME }} --version || ./${{ env.BINARY_NAME }} --help || echo "Linux binary execute test ok"
+          if [ -f ./${{ env.BINARY_NAME }}.exe ]; then
+            echo "✅ Windows binary yogo.exe exported successfully"
+          else
+            echo "❌ Windows binary missing"
+            exit 1
+          fi
           ls -lh
 
+      # 第三段构建：复用缓存，仅推送镜像到双仓库
+      - name: Push image to registries (reuse full cache)
+        if: ${{ steps.flags.outputs.push_enabled == 'true' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          platforms: ${{ inputs.target_platforms }}
+          target: runtime
+          push: true
+          load: false
+          tags: ${{ steps.combine-tags.outputs.full_image_tags }}
+          labels: ${{ (inputs.push_registry == 'dockerhub' || inputs.push_registry == 'both') && steps.meta-dockerhub.outputs.labels || steps.meta-ghcr.outputs.labels }}
+          cache-from: type=gha
+          build-args: |
+            USE_CHINA_MIRROR=${{ inputs.use_china_mirror }}
+            ALPINE_MIRROR=${{ inputs.alpine_mirror }}
+
+      # 打包Release制品，同时包含Linux与Windows二进制
       - name: Package release artifacts
         if: ${{ steps.flags.outputs.publish_release == 'true' }}
         run: |
@@ -270,8 +299,8 @@ jobs:
           BIN_VER=${{ steps.flags.outputs.release_version }}
           ARCH=$(echo ${{ inputs.target_platforms }} | cut -d'/' -f2)
           cp ${{ env.BIN_OUT_DIR }}/${{ env.BINARY_NAME }} ${{ env.RELEASE_ARTIFACT_DIR }}/${{ env.BINARY_NAME }}-linux-$ARCH-$BIN_VER
+          chmod +x ${{ env.RELEASE_ARTIFACT_DIR }}/*-linux-*
           cp ${{ env.BIN_OUT_DIR }}/${{ env.BINARY_NAME }}.exe ${{ env.RELEASE_ARTIFACT_DIR }}/${{ env.BINARY_NAME }}-windows-$ARCH-$BIN_VER
-          chmod +x ${{ env.RELEASE_ARTIFACT_DIR }}/*
           ls -la ${{ env.RELEASE_ARTIFACT_DIR }}
 
       - name: Upload binary release artifact
@@ -282,7 +311,8 @@ jobs:
           path: ${{ env.RELEASE_ARTIFACT_DIR }}/
           retention-days: 30
 
-      - name: Save runtime image for debug inspection
+      # Debug模式保存完整runtime镜像tar包用于本地调试
+      - name: Save runtime image tar for debug inspection
         if: ${{ inputs.debug_mode }}
         run: |
           mkdir -p /tmp/debug-image-cache

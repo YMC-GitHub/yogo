@@ -52,3 +52,5 @@ secret/*
 
 # ignore model files in model folder
 model/*
+
+release_tmp/*

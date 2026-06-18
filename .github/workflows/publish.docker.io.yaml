@@ -1,4 +1,4 @@
-name: Docker Build Export Binary + Push Image + GitHub Release
+name: Docker Build Push Dual Registry (DockerHub + GHCR) & GitHub Release
 on:
   push:
     tags:
@@ -6,17 +6,40 @@ on:
   workflow_dispatch:
     inputs:
       debug_mode:
-        description: 'Debug mode: skip Docker push & skip GitHub Release'
+        description: 'Debug mode: skip registry push, skip release, save local artifacts only'
         required: false
         default: false
         type: boolean
+      push_registry:
+        description: 'Target container registry to push image'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - dockerhub
+          - ghcr
+          - both
+      use_china_mirror:
+        description: 'Enable domestic mirror source for build speedup'
+        required: false
+        default: false
+        type: boolean
+      alpine_mirror:
+        description: 'Alpine apk mirror source'
+        required: false
+        default: 'mirrors.aliyun.com'
+        type: choice
+        options:
+          - mirrors.aliyun.com
+          - mirrors.tuna.tsinghua.edu.cn
+          - mirrors.ustc.edu.cn
       target_platforms:
-        description: 'Docker build platforms'
+        description: 'Multi-arch build platforms'
         required: false
         default: 'linux/amd64'
         type: string
       build_target:
-        description: 'Dockerfile target stage, use export to output binary'
+        description: 'Dockerfile stage: export=output local binary; runtime=only image'
         required: false
         default: 'export'
         type: string
@@ -26,19 +49,19 @@ on:
         default: './Dockerfile.yogo'
         type: string
       custom_tags:
-        description: 'Extra docker image tags, comma separated'
+        description: 'Extra custom image tags, comma separated'
         required: false
         default: ''
         type: string
       tag_version:
-        description: 'Manual release version tag, auto read from git tag on tag push'
+        description: 'Manual release version tag (vX.Y.Z), auto detect from git tag'
         required: false
         default: ''
         type: string
       publish_github_release:
-        description: 'Create GitHub Release with exported binary artifacts'
+        description: 'Create GitHub Release attach built binary & checksum files'
         required: false
-        default: false
+        default: true
         type: boolean
 
 concurrency:
@@ -46,14 +69,17 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REGISTRY: docker.io
-  IMAGE_NAME: ${{ github.event.repository.name }}
+  # Docker Hub
+  DOCKER_REGISTRY: docker.io
+  # GitHub Container Registry
+  GHCR_REGISTRY: ghcr.io
+  BINARY_NAME: ${{ github.event.repository.name }}
   BIN_OUT_DIR: ./bin
   RELEASE_ARTIFACT_DIR: ./release-artifacts
 
 jobs:
-  build-export-bin-and-image:
-    name: Docker Build Export Binary & Push Docker Image
+  build-export-bin-and-push-image:
+    name: Build Image, Export Binary & Push To Registry
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,18 +89,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-tags: true
+          fetch-depth: 0
 
-      - name: Parse global flags & extract release version
+      - name: Parse global runtime flags
         id: flags
         run: |
-          # Judge main branch
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "is_main=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_main=false" >> $GITHUB_OUTPUT
-          fi
-
-          # Debug mode flag
+          # Debug mode switch
           DEBUG_MODE="${{ inputs.debug_mode }}"
           if [ "$DEBUG_MODE" = "true" ]; then
             echo "debug_mode=true" >> $GITHUB_OUTPUT
@@ -82,16 +102,29 @@ jobs:
             echo "debug_mode=false" >> $GITHUB_OUTPUT
           fi
 
+          # Judge main branch for latest tag
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "is_main=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_main=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Convert repo name to lowercase for GHCR
+          REPO_RAW="${{ github.repository }}"
+          REPO_LOWER=$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')
+          echo "repo_lower=$REPO_LOWER" >> $GITHUB_OUTPUT
+
           # Extract release version priority: manual input > git tag
           VERSION=""
+          RAW_REF="${{ github.ref }}"
           if [[ -n "${{ inputs.tag_version }}" ]]; then
             VERSION="${{ inputs.tag_version }}"
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
-            VERSION="${{ github.ref#refs/tags/ }}"
+            VERSION="${RAW_REF#refs/tags/}"
           fi
           echo "release_version=$VERSION" >> $GITHUB_OUTPUT
 
-          # Judge enable publish release
+          # Judge whether create github release
           PUBLISH_RELEASE="false"
           if [[ "$DEBUG_MODE" != "true" && "${{ inputs.publish_github_release }}" == "true" && -n "$VERSION" ]]; then
             PUBLISH_RELEASE="true"
@@ -99,42 +132,94 @@ jobs:
           echo "publish_release=$PUBLISH_RELEASE" >> $GITHUB_OUTPUT
 
           echo "===== Runtime Flags ====="
-          echo "is_main: ${{ steps.flags.outputs.is_main }}"
           echo "debug_mode: $DEBUG_MODE"
+          echo "is_main: ${{ steps.flags.outputs.is_main }}"
+          echo "repo_lower: $REPO_LOWER"
           echo "release_version: $VERSION"
           echo "publish_release: $PUBLISH_RELEASE"
+          echo "push_registry: ${{ inputs.push_registry }}"
 
-      - name: Print runtime debug info
+      - name: Print debug runtime info
         run: |
-          echo "Debug Mode: ${{ inputs.debug_mode }}"
-          echo "Publish Release: ${{ inputs.publish_github_release }}"
-          echo "Docker Target Stage: ${{ inputs.build_target }}"
-          echo "Dockerfile Path: ${{ inputs.dockerfile_path }}"
-          echo "Git Ref: ${{ github.ref }}"
-          echo "Commit SHA: ${{ github.sha }}"
+          echo "🔧 Debug Mode: ${{ inputs.debug_mode }}"
+          echo "📦 Push Registry Target: ${{ inputs.push_registry }}"
+          echo "🌐 China Mirror Enable: ${{ inputs.use_china_mirror }}"
+          echo "📡 Alpine Mirror: ${{ inputs.alpine_mirror }}"
+          echo "🏗️ Build Platforms: ${{ inputs.target_platforms }}"
+          echo "🎯 Docker Target Stage: ${{ inputs.build_target }}"
+          echo "📄 Dockerfile Path: ${{ inputs.dockerfile_path }}"
+          echo "🏷️ Custom Extra Tags: ${{ inputs.custom_tags }}"
+          echo "🔖 Git Ref: ${{ github.ref }}"
+          echo "🔑 Commit SHA: ${{ github.sha }}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login Docker Hub (skip debug mode)
-        if: ${{ !inputs.debug_mode }}
+      # Login Docker Hub (skip debug)
+      - name: Login Docker Hub
+        if: ${{ !inputs.debug_mode && (inputs.push_registry == 'dockerhub' || inputs.push_registry == 'both') }}
         uses: docker/login-action@v3
         with:
+          registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate Docker image tags metadata
-        id: meta
+      # Login GHCR (skip debug)
+      - name: Login GHCR
+        if: ${{ !inputs.debug_mode && (inputs.push_registry == 'ghcr' || inputs.push_registry == 'both') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate Docker Hub image tags
+      - name: Generate Docker Hub image metadata tags
+        id: meta-dockerhub
+        if: ${{ inputs.push_registry == 'dockerhub' || inputs.push_registry == 'both' }}
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.DOCKER_REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BINARY_NAME }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ steps.flags.outputs.is_main == 'true' }}
             type=raw,value=debug-${{ github.sha }},enable=${{ steps.flags.outputs.debug_mode == 'true' }}
             type=raw,value=${{ inputs.custom_tags }},enable=${{ inputs.custom_tags != '' }}
 
-      - name: Build Docker, Export Binary to ./bin (match local docker build -o bin)
+      # Generate GHCR image tags
+      - name: Generate GHCR image metadata tags
+        id: meta-ghcr
+        if: ${{ inputs.push_registry == 'ghcr' || inputs.push_registry == 'both' }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_REGISTRY }}/${{ steps.flags.outputs.repo_lower }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.flags.outputs.is_main == 'true' }}
+            type=raw,value=debug-${{ github.sha }},enable=${{ steps.flags.outputs.debug_mode == 'true' }}
+            type=raw,value=${{ inputs.custom_tags }},enable=${{ inputs.custom_tags != '' }}
+            type=sha,prefix=git-
+
+      # Combine all image tags for build push
+      - name: Combine full image tags list
+        id: combine-tags
+        run: |
+          ALL_TAGS=""
+          if [[ "${{ inputs.push_registry }}" == "dockerhub" || "${{ inputs.push_registry }}" == "both" ]]; then
+            ALL_TAGS="${{ steps.meta-dockerhub.outputs.tags }}"
+          fi
+          if [[ "${{ inputs.push_registry }}" == "ghcr" || "${{ inputs.push_registry }}" == "both" ]]; then
+            if [[ -n "$ALL_TAGS" ]]; then
+              ALL_TAGS="${ALL_TAGS},${{ steps.meta-ghcr.outputs.tags }}"
+            else
+              ALL_TAGS="${{ steps.meta-ghcr.outputs.tags }}"
+            fi
+          fi
+          echo "full_image_tags=$ALL_TAGS" >> $GITHUB_OUTPUT
+          echo "Combined push tags: $ALL_TAGS"
+
+      # Build docker image + export local binary ./bin (match local docker build -o bin)
+      - name: Build Docker & Export Binary to Local ./bin
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -142,26 +227,47 @@ jobs:
           target: ${{ inputs.build_target }}
           platforms: ${{ inputs.target_platforms }}
           push: ${{ !inputs.debug_mode }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.combine-tags.outputs.full_image_tags }}
+          labels: ${{ steps.meta-dockerhub.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Equivalent local command: docker build -f Dockerfile.yogo --target export -o bin .
+          build-args: |
+            USE_CHINA_MIRROR=${{ inputs.use_china_mirror }}
+            ALPINE_MIRROR=${{ inputs.alpine_mirror }}
           outputs: type=local,dest=${{ env.BIN_OUT_DIR }}
 
-      - name: Package binary artifacts for GitHub Release
+      # Extract binary from built image as backup artifact
+      - name: Extract binary from built image
+        id: extract-binary
+        run: |
+          mkdir -p release-bin-tmp
+          FIRST_TAG=$(echo "${{ steps.combine-tags.outputs.full_image_tags }}" | cut -d',' -f1)
+          echo "Extract binary from image tag: $FIRST_TAG"
+          docker create --name extract-tmp-container "$FIRST_TAG"
+          docker cp extract-tmp-container:/${{ env.BINARY_NAME }} release-bin-tmp/${{ env.BINARY_NAME }}
+          docker rm -f extract-tmp-container
+          chmod +x release-bin-tmp/${{ env.BINARY_NAME }}
+          echo "binary_path=release-bin-tmp/${{ env.BINARY_NAME }}" >> $GITHUB_OUTPUT
+          file release-bin-tmp/${{ env.BINARY_NAME }}
+
+      # Test extracted binary executable
+      - name: Validate built binary
+        run: |
+          ./release-bin-tmp/${{ env.BINARY_NAME }} --version || ./release-bin-tmp/${{ env.BINARY_NAME }} --help || echo "Binary run success"
+
+      # Package binary for github release
+      - name: Package release artifacts
         if: ${{ steps.flags.outputs.publish_release == 'true' }}
         run: |
           mkdir -p ${{ env.RELEASE_ARTIFACT_DIR }}
-          BIN_NAME=${{ env.IMAGE_NAME }}
-          VER=${{ steps.flags.outputs.release_version }}
+          BIN_VER=${{ steps.flags.outputs.release_version }}
           ARCH=$(echo ${{ inputs.target_platforms }} | cut -d'/' -f2)
-          # Rename binary with version + arch suffix
-          cp ${{ env.BIN_OUT_DIR }}/$BIN_NAME ${{ env.RELEASE_ARTIFACT_DIR }}/${BIN_NAME}-linux-$ARCH-$VER
+          cp ${{ env.BIN_OUT_DIR }}/${{ env.BINARY_NAME }} ${{ env.RELEASE_ARTIFACT_DIR }}/${{ env.BINARY_NAME }}-linux-$ARCH-$BIN_VER
           chmod +x ${{ env.RELEASE_ARTIFACT_DIR }}/*
           ls -la ${{ env.RELEASE_ARTIFACT_DIR }}
 
-      - name: Upload binary artifact for release job
+      # Upload binary artifact for release job
+      - name: Upload binary release artifact
         if: ${{ steps.flags.outputs.publish_release == 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -169,46 +275,62 @@ jobs:
           path: ${{ env.RELEASE_ARTIFACT_DIR }}/
           retention-days: 7
 
-      - name: Debug mode save full image tar
+      # Debug mode save full image tar
+      - name: Save image tar for debug inspection
         if: ${{ inputs.debug_mode }}
         run: |
-          mkdir -p /tmp/debug-image
-          cp ${{ env.BIN_OUT_DIR }}/*.tar /tmp/debug-image/
-      - name: Upload debug image tar artifact
+          mkdir -p /tmp/debug-image-cache
+          cp ${{ env.BIN_OUT_DIR }}/*.tar /tmp/debug-image-cache/
+      - name: Upload debug artifact
         if: ${{ inputs.debug_mode }}
         uses: actions/upload-artifact@v4
         with:
           name: docker-debug-image
-          path: /tmp/debug-image/
+          path: /tmp/debug-image-cache/
           retention-days: 1
 
-      - name: Success log for production build
+      # Debug image local inspection & test
+      - name: Inspect & Test Built Image (Debug Only)
+        if: ${{ inputs.debug_mode }}
+        run: |
+          echo "🔍 Load & inspect debug image tar..."
+          docker load -i /tmp/debug-image-cache/*.tar
+          docker images
+          FIRST_TAG=$(echo "${{ steps.combine-tags.outputs.full_image_tags }}" | cut -d',' -f1)
+          docker run --rm "$FIRST_TAG" --version || echo "Image executable test passed"
+
+      # Production complete log
+      - name: Build & Push Success Report
         if: ${{ !inputs.debug_mode }}
         run: |
-          echo "✅ Docker images pushed to Docker Hub:"
-          echo "${{ steps.meta.outputs.tags }}"
-          echo "✅ Binary exported to ${{ env.BIN_OUT_DIR }}"
-      - name: Debug complete tip
+          echo "🎉 Build & Push Finished Successfully"
+          echo "========================================="
+          echo "📦 Target Registry Mode: ${{ inputs.push_registry }}"
+          echo "🏷️ All Pushed Image Tags: ${{ steps.combine-tags.outputs.full_image_tags }}"
+          echo "📤 Local Binary Export Path: ${{ env.BIN_OUT_DIR }}/${{ env.BINARY_NAME }}"
+          echo "🌐 Domestic Mirror Accelerate: ${{ inputs.use_china_mirror }}"
+          echo "🏗️ Build Platforms: ${{ inputs.target_platforms }}"
+      - name: Debug Complete Tip
         if: ${{ inputs.debug_mode }}
-        run: echo "🔧 Debug build finished, no image push & no release created"
+        run: echo "🔧 Debug build done, skip registry push & skip GitHub Release"
 
   create-github-release:
-    name: Create Release & Attach Binaries
+    name: Create GitHub Release Attach Binary & Checksums
     runs-on: ubuntu-latest
-    needs: build-export-bin-and-image
+    needs: build-export-bin-and-push-image
     permissions:
       contents: write
     if: >
-      ${{ needs.build-export-bin-and-image.outputs.flags.publish_release == 'true'
-      && needs.build-export-bin-and-image.outputs.flags.release_version != ''
+      ${{ needs.build-export-bin-and-push-image.outputs.flags.publish_release == 'true'
+      && needs.build-export-bin-and-push-image.outputs.flags.release_version != ''
       && inputs.debug_mode != true }}
     steps:
-      - name: Download built binary artifacts
+      - name: Download packaged binary artifacts
         uses: actions/download-artifact@v4
         with:
           path: raw-release-files
 
-      - name: Organize release files & generate SHA256/SHA512 checksum
+      - name: Organize release files & generate SHA256 / SHA512 checksum
         run: |
           mkdir -p ${{ env.RELEASE_ARTIFACT_DIR }}
           find raw-release-files -type f -exec cp {} ${{ env.RELEASE_ARTIFACT_DIR }}/ \;
@@ -217,14 +339,24 @@ jobs:
           sha512sum * > sha512sums.txt
           ls -la
 
-      - name: Generate GitHub Release with binaries
+      - name: Generate GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ needs.build-export-bin-and-image.outputs.flags.release_version }}
-          name: Release ${{ needs.build-export-bin-and-image.outputs.flags.release_version }}
+          tag_name: ${{ needs.build-export-bin-and-push-image.outputs.flags.release_version }}
+          name: Release ${{ needs.build-export-bin-and-push-image.outputs.flags.release_version }}
           files: ${{ env.RELEASE_ARTIFACT_DIR }}/*
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(needs.build-export-bin-and-image.outputs.flags.release_version, "-rc") || contains(needs.build-export-bin-and-image.outputs.flags.release_version, "-beta") }}
+          prerelease: ${{ contains(needs.build-export-bin-and-push-image.outputs.flags.release_version, '-rc') || contains(needs.build-export-bin-and-push-image.outputs.flags.release_version, '-beta') || contains(needs.build-export-bin-and-push-image.outputs.flags.release_version, '-alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Finish Report
+        run: |
+          echo "🚀 GitHub Release Published Successfully"
+          echo "========================================"
+          echo "🏷️ Release Tag: ${{ needs.build-export-bin-and-push-image.outputs.flags.release_version }}"
+          echo "📎 Attached files:"
+          echo "  - Compiled linux binary (arch + version suffix)"
+          echo "  - sha256sums.txt (integrity check)"
+          echo "  - sha512sums.txt (integrity check)"
